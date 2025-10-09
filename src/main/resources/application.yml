@@ -1,0 +1,7 @@
+spring:
+  application:
+    name: document-service
+  config:
+    import: configserver:http://localhost:8082/
+  profiles:
+    active: dev
