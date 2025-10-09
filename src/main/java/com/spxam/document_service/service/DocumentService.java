@@ -13,6 +13,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+
+import com.spxam.document_service.exception.DocumentNotFoundException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,6 +22,11 @@ import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.tika.Tika;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.codec.Hex;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
@@ -60,6 +67,10 @@ public class DocumentService {
         this.properties = properties;
     }
 
+    public Document getDocument(String uuid) {
+        UUID docId = UUID.fromString(uuid);
+        return documentRepository.findById(docId).orElseThrow(() ->new DocumentNotFoundException("Document not found: " + uuid));
+    }
     public Document handleUpload(MultipartFile file, String tenantId, String uploadedBy) throws Exception {
         Path tempFile = null;
         try {
@@ -437,30 +448,40 @@ public class DocumentService {
             cleanupTemporaryFile(originalFile, fileToScan);
         }
     }
+
     private void handleEncryptedPDF(UUID docId, String sha256, Path encryptedFile) throws IOException {
-        Document doc = documentRepository.findById(docId)
-                .orElseThrow(() -> new IllegalStateException("Document not found: " + docId));
 
-        // Mark document as requiring password or special handling
-        doc.setStatus(DocumentStatus.ENCRYPTED);
-
-        // Move to a special quarantine area for encrypted files
-        Path encryptedQuarantine = storageService.getQuarantinePath(sha256);
-        storageService.moveFile(encryptedFile, encryptedQuarantine);
-        doc.setStoragePath(encryptedQuarantine.toString());
-
-        // Add metadata about the encryption
-        Map<String, Object> meta = doc.getMeta();
-        if (meta == null) {
-            meta = new HashMap<>();
-        }
-        meta.put("encrypted", true);
-        meta.put("scanBlocked", "PDF encryption prevented virus scanning");
-        meta.put("encryptionHandling", "requires_manual_review");
-        doc.setMeta(meta);
-
-        documentRepository.save(doc);
-        logger.info("Encrypted PDF quarantined for manual review: {}", docId);
     }
 
+    public ResponseEntity<Resource> handleDownload(String id) {
+        try {
+            Document document = getDocument(id);
+
+            // Check availability
+            if (document.getStatus() != DocumentStatus.AVAILABLE) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN)
+                        .body(null);
+            }
+
+            Path filePath = Paths.get(document.getStoragePath());
+            if (!Files.exists(filePath)) {
+                throw new DocumentNotFoundException("File not found in storage. ");
+            }
+
+            Resource resource = new FileSystemResource(filePath);
+
+            return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_DISPOSITION,
+                            "attachment; filename=\"" + document.getOriginalName() + "\"")
+                    .header(HttpHeaders.CONTENT_TYPE, document.getContentType())
+                    .header(HttpHeaders.CONTENT_LENGTH, String.valueOf(document.getSize()))
+                    .body(resource);
+
+        }catch (DocumentNotFoundException w){
+            throw new DocumentNotFoundException(w.getMessage());
+        }
+        catch (Exception e) {
+            throw new RuntimeException("Download failed for document: " + id, e);
+        }
+    }
 }

@@ -123,9 +123,16 @@ public class ScanWorkerService {
         Path cleanPath = storageService.getCleanPath(job.getSha256());
         storageService.moveFile(filePath, cleanPath);
         scanCache.put(job.getSha256(), ScanVerdict.clean());
-        updateDocumentStatus(job.getDocId(), DocumentStatus.AVAILABLE);
+        updateDocumentStatus(job.getDocId(), DocumentStatus.AVAILABLE,cleanPath);
     }
 
+    private void updateDocumentStatus(UUID docId, DocumentStatus status,Path path) {
+        documentRepository.findById(docId).ifPresent(doc -> {
+            doc.setStatus(status); doc.setStoragePath(path.toString());
+            documentRepository.save(doc);
+        });
+
+    }
     private void moveToQuarantine(ScanJob job, Path filePath, String reason) throws IOException {
         Path quarantine = storageService.getQuarantinePath(job.getSha256());
         storageService.moveFile(filePath, quarantine);
