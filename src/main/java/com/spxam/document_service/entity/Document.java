@@ -5,13 +5,13 @@ import java.util.Map;
 import java.util.UUID;
 
 import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.Type;
 import org.hibernate.annotations.UpdateTimestamp;
 
-import com.spxam.document_service.converter.JpaJsonConverter;
 import com.spxam.document_service.enums.DocumentStatus;
+import com.vladmihalcea.hibernate.type.json.JsonBinaryType;
 
 import jakarta.persistence.Column;
-import jakarta.persistence.Convert;
 import jakarta.persistence.Entity;
 import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
@@ -66,11 +66,11 @@ public class Document {
     private boolean isPublic = false;
 
     @Column(columnDefinition = "jsonb")
-    @Convert(converter = JpaJsonConverter.class)
+    @Type(JsonBinaryType.class)
     private Map<String,Object> accessControl;
 
     @Column(columnDefinition = "jsonb")
-    @Convert(converter = JpaJsonConverter.class)
+    @Type(JsonBinaryType.class)
     private List<String> tags;
 
     @Version
@@ -92,7 +92,7 @@ public class Document {
     private String ocrTextPath;
 
     @Column(columnDefinition = "jsonb")
-    @Convert(converter = JpaJsonConverter.class)
+    @Type(JsonBinaryType.class)
     private Map<String,Object> meta;
 
     @CreationTimestamp
@@ -103,6 +103,4 @@ public class Document {
 
     private Instant deletedAt;
     private String deletedBy;
-
-    // getters/setters
 }
