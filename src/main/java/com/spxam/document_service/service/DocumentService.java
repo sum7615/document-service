@@ -8,8 +8,13 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
+import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.pdfbox.Loader;
@@ -36,7 +41,7 @@ public class DocumentService {
     private final ClamAvClient clamAvClient;
     private final DocumentUploadProperties properties;
     private final Tika tika = new Tika();
-    
+    private static final Logger logger = LoggerFactory.getLogger(DocumentService.class);
     // Improved cache with TTL
     private final Cache<String, ScanVerdict> scanCache = Caffeine.newBuilder()
         .expireAfterWrite(24, TimeUnit.HOURS)
@@ -147,6 +152,8 @@ public class DocumentService {
     private Document createDocumentEntity(MultipartFile file, UUID docId, String tenantId, 
                                          String uploadedBy, String sha256, String contentType, 
                                          Path tempFile) {
+        Map<String,Object> metaData = new HashMap();
+
         Document doc = new Document();
         doc.setId(docId);
         doc.setTenantId(tenantId);
@@ -154,6 +161,7 @@ public class DocumentService {
         doc.setContentType(contentType);
         doc.setSize(file.getSize());
         doc.setChecksum(sha256);
+//        doc.setMeta( );
         doc.setChecksumAlgorithm("SHA-256");
         doc.setStorageName(docId.toString());
         doc.setExtension(getFileExtension(file.getOriginalFilename()));
@@ -193,56 +201,266 @@ public class DocumentService {
             return sanitized;
         }
     }
-
-    // Async scan processor (to be called by your queue consumer)
     public void processDeepScan(UUID docId, String sha256, String filePath, String contentType) {
         Path file = Paths.get(filePath);
+        Path fileToScan = file;
+
         try {
             // Additional sanitization for PDFs
             if ("application/pdf".equals(contentType)) {
-                Path sanitized = sanitizePDF(file);
-                Files.delete(file); // delete original
-                file = sanitized; // use sanitized version
-                // Recalculate checksum if needed
-            }
-            
-            // Deep scan
-            ClamResult fullScan = clamAvClient.scan(file);
-            
-            Document doc = documentRepository.findById(docId)
-                .orElseThrow(() -> new IllegalStateException("Document not found: " + docId));
-                
-            if (fullScan.isMalicious()) {
-                doc.setStatus(DocumentStatus.MALICIOUS);
-                Path quarantinePath = storageService.getQuarantinePath(sha256);
-                storageService.moveFile(file, quarantinePath);
-                doc.setStoragePath(quarantinePath.toString());
-                
-                // Cache malicious verdict
-                if (properties.isCacheScanResults()) {
-                    scanCache.put(sha256, ScanVerdict.malicious(fullScan.getSignature()));
-                }
-            } else {
-                doc.setStatus(DocumentStatus.AVAILABLE);
-                Path permanentPath = storageService.getCleanPath(sha256);
-                storageService.moveFile(file, permanentPath);
-                doc.setStoragePath(permanentPath.toString());
-                
-                // Cache clean verdict
-                if (properties.isCacheScanResults()) {
-                    scanCache.put(sha256, ScanVerdict.clean());
+                try {
+                    fileToScan = handlePDFEncryption(file);
+                } catch (IOException e) {
+                    // Handle encrypted PDF that cannot be decrypted
+                    logger.warn("Failed to process encrypted PDF for document "+docId.toString()+" : "+ e.getMessage());
+                    handleEncryptedPDF(docId, sha256, file);
+                    return;
                 }
             }
-            
-            documentRepository.save(doc);
-            
+
+            // Continue with deep scan using the processed file
+            ClamResult fullScan = clamAvClient.scan(fileToScan);
+            processScanResult(docId, sha256, file, fileToScan, fullScan);
+
         } catch (Exception e) {
-            // Update document status to indicate scan failure
-            documentRepository.findById(docId).ifPresent(doc -> {
-                doc.setStatus(DocumentStatus.FAILED);
-                documentRepository.save(doc);
-            });
-            // Log error
+            logger.error("Scan failed for doc "+docId+": "+e.getMessage());
+            handleScanFailure(docId, e);
+        } finally {
+            // Clean up temporary file if one was created
+            if (fileToScan != file && Files.exists(fileToScan)) {
+                try {
+                    Files.delete(fileToScan);
+                } catch (IOException e) {
+                    logger.warn("Failed to delete temporary file: {}", fileToScan, e);
+                }
+            }
         }
     }
+    private void handleScanFailure(UUID docId, Exception error) {
+        logger.error("Scan failure for document {}: {}", docId, error.getMessage(), error);
+
+        try {
+            Document doc = documentRepository.findById(docId).orElse(null);
+
+            if (doc != null) {
+                // Update document status
+                doc.setStatus(DocumentStatus.SCAN_FAILED);
+
+                // Add error metadata
+                Map<String, Object> meta = doc.getMeta();
+                if (meta == null) {
+                    meta = new HashMap<>();
+                }
+                meta.put("scanError", true);
+                meta.put("errorMessage", error.getMessage());
+                meta.put("errorType", error.getClass().getSimpleName());
+                meta.put("failedAt", Instant.now().toString());
+                doc.setMeta(meta);
+
+                documentRepository.save(doc);
+                logger.warn("Document {} marked as SCAN_FAILED due to: {}", docId, error.getMessage());
+            } else {
+                logger.error("Document {} not found while handling scan failure", docId);
+            }
+        } catch (Exception e) {
+            logger.error("Failed to handle scan failure for document {}: {}", docId, e.getMessage(), e);
+        }
+    }
+    private Path handlePDFEncryption(Path pdfFile) throws IOException {
+        try (PDDocument doc = Loader.loadPDF(pdfFile.toFile())) {
+            if (doc.isEncrypted()) {
+                doc.setAllSecurityToBeRemoved(true);
+
+                Path sanitized = Files.createTempFile("decrypted", ".pdf");
+                doc.save(sanitized.toFile());
+                return sanitized;
+            } else {
+                // No encryption, just sanitize normally
+                return sanitizePDF(pdfFile);
+            }
+        } catch (IOException e) {
+            if (e.getMessage().contains("encryption dictionary")) {
+                throw new IOException("PDF is encrypted and cannot be decrypted automatically", e);
+            }
+            throw e;
+        }
+    }
+    private void processScanResult(UUID docId, String sha256, Path originalFile,
+                                   Path fileToScan, ClamResult scanResult) {
+        Document doc = documentRepository.findById(docId)
+                .orElseThrow(() -> new IllegalStateException("Document not found: " + docId));
+
+        try {
+            if (scanResult.isMalicious()) {
+                handleMaliciousFile(doc, sha256, originalFile, fileToScan, scanResult);
+            } else {
+                handleCleanFile(doc, sha256, originalFile, fileToScan, scanResult);
+            }
+
+            // Update cache with scan verdict
+            cacheScanVerdict(sha256, scanResult);
+
+        } catch (Exception e) {
+            logger.error("Error processing scan result for document {}: {}", docId, e.getMessage(), e);
+            handleScanProcessingError(doc, originalFile, fileToScan, e);
+        }
+    }
+
+    private void handleMaliciousFile(Document doc, String sha256, Path originalFile,
+                                     Path fileToScan, ClamResult scanResult) throws IOException {
+        logger.warn("Malicious file detected for document {}: {}", doc.getId(), scanResult.getSignature());
+
+        // Move to quarantine
+        Path quarantinePath = storageService.getQuarantinePath(sha256);
+        storageService.moveFile(originalFile, quarantinePath);
+
+        // Update document
+        doc.setStatus(DocumentStatus.QUARANTINED);
+        doc.setStoragePath(quarantinePath.toString());
+
+        // Add metadata about the threat
+        Map<String, Object> meta = doc.getMeta();
+        if (meta == null) {
+            meta = new HashMap<>();
+        }
+        meta.put("threatDetected", true);
+        meta.put("threatSignature", scanResult.getSignature());
+        meta.put("quarantinedAt", Instant.now().toString());
+        doc.setMeta(meta);
+
+        documentRepository.save(doc);
+        logger.info("Document {} quarantined due to threat: {}", doc.getId(), scanResult.getSignature());
+
+        // Clean up temporary file if different from original
+        cleanupTemporaryFile(originalFile, fileToScan);
+    }
+
+    private void handleCleanFile(Document doc, String sha256, Path originalFile,
+                                 Path fileToScan, ClamResult scanResult) throws IOException {
+
+        // Determine which file to use for permanent storage
+        Path fileForPermanentStorage = fileToScan;
+        boolean wasSanitized = !originalFile.equals(fileToScan);
+
+        // Move to permanent storage
+        Path permanentPath = storageService.getPermanentPath(doc, sha256);
+        storageService.moveFile(fileForPermanentStorage, permanentPath);
+
+        // Update document
+        doc.setStatus(DocumentStatus.AVAILABLE);
+        doc.setStoragePath(permanentPath.toString());
+
+        // Add metadata about the scan
+        Map<String, Object> meta = doc.getMeta();
+        if (meta == null) {
+            meta = new HashMap<>();
+        }
+        meta.put("scanCompleted", true);
+        meta.put("wasSanitized", wasSanitized);
+        meta.put("clearedAt", Instant.now().toString());
+
+        if (wasSanitized) {
+            meta.put("sanitizationApplied", true);
+            meta.put("originalFileDeleted", true);
+        }
+
+        doc.setMeta(meta);
+
+        documentRepository.save(doc);
+        logger.info("Document {} moved to permanent storage: {}", doc.getId(), permanentPath);
+
+        // Clean up original file if we used a sanitized version
+        if (wasSanitized && Files.exists(originalFile)) {
+            try {
+                Files.delete(originalFile);
+                logger.debug("Original file deleted after sanitization: {}", originalFile);
+            } catch (IOException e) {
+                logger.warn("Failed to delete original file after sanitization: {}", originalFile, e);
+            }
+        }
+    }
+
+    private void cacheScanVerdict(String sha256, ClamResult scanResult) {
+        if (properties.isCacheScanResults()) {
+            ScanVerdict verdict;
+            if (scanResult.isMalicious()) {
+                verdict = ScanVerdict.malicious(scanResult.getSignature());
+            } else {
+                verdict = ScanVerdict.clean();
+            }
+            scanCache.put(sha256, verdict);
+            logger.debug("Cached scan verdict for checksum {}: {}", sha256, verdict);
+        }
+    }
+
+    private void cleanupTemporaryFile(Path originalFile, Path fileToScan) {
+        // Clean up temporary sanitized file if it exists and is different from original
+        if (!originalFile.equals(fileToScan) && Files.exists(fileToScan)) {
+            try {
+                Files.delete(fileToScan);
+                logger.debug("Temporary sanitized file cleaned up: {}", fileToScan);
+            } catch (IOException e) {
+                logger.warn("Failed to clean up temporary file: {}", fileToScan, e);
+            }
+        }
+    }
+
+    private void handleScanProcessingError(Document doc, Path originalFile, Path fileToScan, Exception error) {
+        try {
+            // Update document status
+            doc.setStatus(DocumentStatus.SCAN_FAILED);
+
+            // Add error metadata
+            Map<String, Object> meta = doc.getMeta();
+            if (meta == null) {
+                meta = new HashMap<>();
+            }
+            meta.put("scanError", true);
+            meta.put("errorMessage", error.getMessage());
+            meta.put("errorTime", Instant.now().toString());
+            doc.setMeta(meta);
+
+            documentRepository.save(doc);
+
+            // Move to error quarantine
+            Path errorPath = storageService.getErrorQuarantinePath(doc.getChecksum());
+            try {
+                storageService.moveFile(originalFile, errorPath);
+                doc.setStoragePath(errorPath.toString());
+                documentRepository.save(doc);
+            } catch (IOException moveError) {
+                logger.error("Failed to move file to error quarantine: {}", originalFile, moveError);
+            }
+
+        } finally {
+            // Always clean up temporary files
+            cleanupTemporaryFile(originalFile, fileToScan);
+        }
+    }
+    private void handleEncryptedPDF(UUID docId, String sha256, Path encryptedFile) throws IOException {
+        Document doc = documentRepository.findById(docId)
+                .orElseThrow(() -> new IllegalStateException("Document not found: " + docId));
+
+        // Mark document as requiring password or special handling
+        doc.setStatus(DocumentStatus.ENCRYPTED);
+
+        // Move to a special quarantine area for encrypted files
+        Path encryptedQuarantine = storageService.getQuarantinePath(sha256);
+        storageService.moveFile(encryptedFile, encryptedQuarantine);
+        doc.setStoragePath(encryptedQuarantine.toString());
+
+        // Add metadata about the encryption
+        Map<String, Object> meta = doc.getMeta();
+        if (meta == null) {
+            meta = new HashMap<>();
+        }
+        meta.put("encrypted", true);
+        meta.put("scanBlocked", "PDF encryption prevented virus scanning");
+        meta.put("encryptionHandling", "requires_manual_review");
+        doc.setMeta(meta);
+
+        documentRepository.save(doc);
+        logger.info("Encrypted PDF quarantined for manual review: {}", docId);
+    }
+
 }

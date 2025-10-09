@@ -4,6 +4,8 @@ public enum DocumentStatus {
     QUEUED,
     AVAILABLE,
     MALICIOUS,
-    FAILED
-
+    FAILED,
+    ENCRYPTED,
+    QUARANTINED,
+    SCAN_FAILED
 }
