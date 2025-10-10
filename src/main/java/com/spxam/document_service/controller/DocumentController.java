@@ -2,11 +2,6 @@ package com.spxam.document_service.controller;
 
 import java.util.Map;
 
-import lombok.AllArgsConstructor;
-import org.springframework.core.io.InputStreamResource;
-import org.springframework.core.io.Resource;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -16,6 +11,8 @@ import org.springframework.web.multipart.MultipartFile;
 
 import com.spxam.document_service.entity.Document;
 import com.spxam.document_service.service.DocumentService;
+
+import lombok.AllArgsConstructor;
 
 @RestController
 @AllArgsConstructor

@@ -14,14 +14,12 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
-import com.spxam.document_service.exception.DocumentNotFoundException;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import org.apache.commons.codec.digest.DigestUtils;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.tika.Tika;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
@@ -37,6 +35,7 @@ import com.spxam.document_service.config.DocumentUploadProperties;
 import com.spxam.document_service.dto.ScanVerdict;
 import com.spxam.document_service.entity.Document;
 import com.spxam.document_service.enums.DocumentStatus;
+import com.spxam.document_service.exception.DocumentNotFoundException;
 import com.spxam.document_service.repository.DocumentRepository;
 
 @Service
