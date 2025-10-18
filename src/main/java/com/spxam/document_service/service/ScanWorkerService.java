@@ -19,9 +19,11 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import com.spxam.document_service.dto.DocEventPayload;
 import com.spxam.document_service.dto.ScanVerdict;
 import com.spxam.document_service.enums.DocumentStatus;
 import com.spxam.document_service.repository.DocumentRepository;
+import com.spxam.document_service.util.CommonUtil;
 
 import jakarta.annotation.PostConstruct;
 
@@ -48,6 +50,7 @@ public class ScanWorkerService {
     private final ClamAvClient clamAvClient;
     private final ScanQueue scanQueue;
     private final RetryQueue retryQueue;
+    private final DocumentService documentService;
     private final DiskMonitorService diskMonitorService;
     private final Map<String, ScanVerdict> scanCache = new ConcurrentHashMap<>();
     private ExecutorService workerPool;
@@ -57,13 +60,14 @@ public class ScanWorkerService {
                              ClamAvClient clamAvClient,
                              ScanQueue scanQueue,
                              RetryQueue retryQueue,
-                             DiskMonitorService diskMonitorService) {
+                             DiskMonitorService diskMonitorService,DocumentService documentService) {
         this.storageService = storageService;
         this.documentRepository = documentRepository;
         this.clamAvClient = clamAvClient;
         this.scanQueue = scanQueue;
         this.retryQueue = retryQueue;
         this.diskMonitorService = diskMonitorService;
+        this.documentService=documentService;
     }
 
     @PostConstruct
@@ -130,6 +134,10 @@ public class ScanWorkerService {
         documentRepository.findById(docId).ifPresent(doc -> {
             doc.setStatus(status); doc.setStoragePath(path.toString());
             documentRepository.save(doc);
+
+            DocEventPayload payload = new DocEventPayload(doc.getId().toString(), status.toString());
+            
+            documentService.publish(CommonUtil.convertToJson(payload));
         });
 
     }

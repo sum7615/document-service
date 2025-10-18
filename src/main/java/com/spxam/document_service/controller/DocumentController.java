@@ -2,11 +2,9 @@ package com.spxam.document_service.controller;
 
 import java.util.Map;
 
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import com.spxam.document_service.entity.Document;
@@ -20,12 +18,12 @@ public class DocumentController {
 
     private final DocumentService documentService;
 
-    @GetMapping("/download")
+    @GetMapping(value="/download", produces = MediaType.APPLICATION_OCTET_STREAM_VALUE)
     public ResponseEntity<?> download(@RequestParam("id") String id) {
        return  documentService.handleDownload(id);
     }
-    @PostMapping("/upload")
-    public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file,
+    @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public ResponseEntity<?> upload(@RequestPart("file") MultipartFile file,
                                     @RequestParam("tenantId") String tenantId,
                                     @RequestParam("uploadedBy") String uploadedBy) {
         try {

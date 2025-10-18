@@ -20,6 +20,7 @@ import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.tika.Tika;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpHeaders;
@@ -32,11 +33,14 @@ import org.springframework.web.multipart.MultipartFile;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.spxam.document_service.config.DocumentUploadProperties;
+import com.spxam.document_service.dto.DocEventPayload;
 import com.spxam.document_service.dto.ScanVerdict;
 import com.spxam.document_service.entity.Document;
 import com.spxam.document_service.enums.DocumentStatus;
 import com.spxam.document_service.exception.DocumentNotFoundException;
+import com.spxam.document_service.kafka.KafkaProducer;
 import com.spxam.document_service.repository.DocumentRepository;
+import com.spxam.document_service.util.CommonUtil;
 
 @Service
 public class DocumentService {
@@ -47,6 +51,8 @@ public class DocumentService {
     private final ClamAvClient clamAvClient;
     private final DocumentUploadProperties properties;
     private final Tika tika = new Tika();
+    private final KafkaProducer kafkaProducer;
+    
     private static final Logger logger = LoggerFactory.getLogger(DocumentService.class);
     // Improved cache with TTL
     private final Cache<String, ScanVerdict> scanCache = Caffeine.newBuilder()
@@ -54,16 +60,19 @@ public class DocumentService {
         .maximumSize(10_000)
         .build();
 
+    @Value("${app.kafka.topic.doc-events}")
+    String docTopic; 
     public DocumentService(StorageService storageService,
                            DocumentRepository documentRepository,
                            ScanQueue scanQueue,
                            ClamAvClient clamAvClient,
-                           DocumentUploadProperties properties) {
+                           DocumentUploadProperties properties,KafkaProducer kafkaProducer) {
         this.storageService = storageService;
         this.documentRepository = documentRepository;
         this.scanQueue = scanQueue;
         this.clamAvClient = clamAvClient;
         this.properties = properties;
+        this.kafkaProducer=kafkaProducer;
     }
 
     public Document getDocument(String uuid) {
@@ -162,7 +171,7 @@ public class DocumentService {
     private Document createDocumentEntity(MultipartFile file, UUID docId, String tenantId, 
                                          String uploadedBy, String sha256, String contentType, 
                                          Path tempFile) {
-        Map<String,Object> metaData = new HashMap();
+//        Map<String,Object> metaData = new HashMap();
 
         Document doc = new Document();
         doc.setId(docId);
@@ -275,6 +284,10 @@ public class DocumentService {
         } catch (Exception e) {
             logger.error("Failed to handle scan failure for document {}: {}", docId, e.getMessage(), e);
         }
+
+        DocEventPayload payload = new DocEventPayload(docId.toString(), DocumentStatus.SCAN_FAILED.toString());
+        
+        publish(CommonUtil.convertToJson(payload));
     }
     private Path handlePDFEncryption(Path pdfFile) throws IOException {
         try (PDDocument doc = Loader.loadPDF(pdfFile.toFile())) {
@@ -341,6 +354,9 @@ public class DocumentService {
         documentRepository.save(doc);
         logger.info("Document {} quarantined due to threat: {}", doc.getId(), scanResult.getSignature());
 
+        DocEventPayload payload = new DocEventPayload(doc.getId().toString(), DocumentStatus.QUARANTINED.toString());
+        
+        publish(CommonUtil.convertToJson(payload));
         // Clean up temporary file if different from original
         cleanupTemporaryFile(originalFile, fileToScan);
     }
@@ -377,13 +393,14 @@ public class DocumentService {
         doc.setMeta(meta);
 
         documentRepository.save(doc);
-        logger.info("Document {} moved to permanent storage: {}", doc.getId(), permanentPath);
 
+        DocEventPayload payload = new DocEventPayload(doc.getId().toString(), DocumentStatus.AVAILABLE.toString());
+        
+        publish(CommonUtil.convertToJson(payload));
         // Clean up original file if we used a sanitized version
         if (wasSanitized && Files.exists(originalFile)) {
             try {
                 Files.delete(originalFile);
-                logger.debug("Original file deleted after sanitization: {}", originalFile);
             } catch (IOException e) {
                 logger.warn("Failed to delete original file after sanitization: {}", originalFile, e);
             }
@@ -446,6 +463,10 @@ public class DocumentService {
             // Always clean up temporary files
             cleanupTemporaryFile(originalFile, fileToScan);
         }
+        
+        DocEventPayload payload = new DocEventPayload(doc.getId().toString(), DocumentStatus.SCAN_FAILED.toString());
+        
+        publish(CommonUtil.convertToJson(payload));
     }
 
     private void handleEncryptedPDF(UUID docId, String sha256, Path encryptedFile) throws IOException {
@@ -483,4 +504,9 @@ public class DocumentService {
             throw new RuntimeException("Download failed for document: " + id, e);
         }
     }
+    
+    public void publish(String payload) {
+    	kafkaProducer.sendMessage(docTopic, payload);
+    }
+    
 }
